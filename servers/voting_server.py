@@ -1,3 +1,4 @@
+# servers/voting_server.py
 import Pyro4
 import Pyro4.util
 import json
@@ -29,32 +30,18 @@ class VotingServer:
 
         Atributos:
         - server_id: id único do servidor.
-        - voters: Dicionário contendo usuário e senha dos eleitores cadastrados (carregado de voters.json).
         - votes: Dicionário para armazenar os votos de cada candidato (ex: {'Candidato A': 5}).
-        - voted_users: Um conjunto (set) que armazena o nome dos eleitores que já votaram.
         - total_servers: Total de servidores ativos (nós) - atualmente não usado para controle dinâmico, mas para contexto.
         - other_servers_uris: Dicionário que mapeia server_id para URI de outros servidores Pyro4.
         - lock: Um lock de threading para proteger o estado interno durante operações concorrentes.
     """
     def __init__(self, server_id, total_servers=1):
         self.server_id = server_id
-        self.voters = self._load_voters()
         self.votes = {}
-        self.voted_users = set()
         self.total_servers = total_servers
         self.other_servers_uris = {}
         self.lock = threading.Lock()
         logger.info(f"[{self.server_id}] Servidor de Votação inicializado.")
-        logger.info(f"[{self.server_id}] Eleitores carregados: {len(self.voters)}")
-
-    def _load_voters(self):
-        """Carrega eleitores de um arquivo JSON simulado ('data/voters.json')."""
-        voters_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'voters.json')
-        if os.path.exists(voters_file):
-            with open(voters_file, 'r') as f:
-                return json.load(f)
-        logger.warning(f"[{self.server_id}] Aviso: Arquivo de eleitores '{voters_file}' não encontrado. Iniciando com eleitores vazios.")
-        return {} # username: password
 
     def _save_votes(self):
         """Salva os votos em um arquivo JSON específico do servidor ('data/votes_server_id.json')."""
@@ -63,20 +50,12 @@ class VotingServer:
             json.dump(self.votes, f, indent=4)
         logger.debug(f"[{self.server_id}] Votos salvos em '{votes_file}'.")
 
-    def _save_voted_users(self):
-        """Salva os usuários que votaram em um arquivo JSON específico do servidor ('data/voted_users_server_id.json')."""
-        voted_users_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', f'voted_users_{self.server_id}.json')
-        with open(voted_users_file, 'w') as f:
-            json.dump(list(self.voted_users), f, indent=4)
-        logger.debug(f"[{self.server_id}] Usuários que votaram salvos em '{voted_users_file}'.")
-
     def _load_state(self):
         """
-        Carrega o estado (votos e usuários que votaram) de arquivos locais persistidos.
+        Carrega o estado (votos) de arquivos locais persistidos.
         Esta é a base antes da sincronização com outros nós.
         """
         votes_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', f'votes_{self.server_id}.json')
-        voted_users_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', f'voted_users_{self.server_id}.json')
 
         with self.lock: # Proteger o acesso ao estado durante o carregamento/sincronização
             if os.path.exists(votes_file):
@@ -84,13 +63,7 @@ class VotingServer:
                     self.votes = json.load(f)
             else:
                 self.votes = {}
-
-            if os.path.exists(voted_users_file):
-                with open(voted_users_file, 'r') as f:
-                    self.voted_users = set(json.load(f))
-            else:
-                self.voted_users = set()
-            logger.info(f"[{self.server_id}] Estado carregado localmente: Votos: {self.votes}, Eleitores que já votaram: {self.voted_users}")
+            logger.info(f"[{self.server_id}] Estado carregado localmente: Votos: {self.votes}")
 
     def _sync_with_other_servers(self):
         """
@@ -115,11 +88,9 @@ class VotingServer:
 
                     with self.lock:
                         self.votes = full_state['votes']
-                        self.voted_users = set(full_state['voted_users'])
                         self._save_votes() # Persiste o estado sincronizado
-                        self._save_voted_users()
                     logger.info(f"[{self.server_id}] Sincronização completa com '{other_server_id}'. Estado atualizado.")
-                    logger.info(f"[{self.server_id}] Novo estado: Votos: {self.votes}, Eleitores que já votaram: {self.voted_users}")
+                    logger.info(f"[{self.server_id}] Novo estado: Votos: {self.votes}")
                     return # Sincronizado com sucesso com um servidor, podemos parar.
             except (Pyro4.errors.CommunicationError, Pyro4.errors.NamingError, Pyro4.errors.TimeoutError) as e:
                 logger.warning(f"[{self.server_id}] Erro ao sincronizar com '{other_server_id}' ({uri}): {e}. Tentando o próximo...")
@@ -148,61 +119,28 @@ class VotingServer:
             logger.error(f"[{self.server_id}] Erro ao localizar o Name Server: {e}. Verifique se o Name Server está rodando.")
             self.other_servers_uris = {}
 
-
     @Pyro4.expose
-    def authenticate_voter(self, username, password):
+    def cast_vote(self, candidate):
         """
-        Autentica um eleitor verificando suas credenciais no dicionário de eleitores.
-        Retorna True se autenticado, False caso contrário.
-        """
-        with self.lock:
-            if username in self.voters and self.voters[username] == password:
-                logger.info(f"[{self.server_id}] Eleitor '{username}' autenticado com sucesso.")
-                return True
-            logger.info(f"[{self.server_id}] Falha na autenticação para '{username}'.")
-            return False
-
-    @Pyro4.expose
-    def has_voted(self, username):
-        """
-        Verifica se o eleitor com o dado nome de usuário já votou.
-        Retorna True se o eleitor já votou, False caso contrário.
-        """
-        with self.lock:
-            return username in self.voted_users
-
-    @Pyro4.expose
-    def cast_vote(self, username, candidate):
-        """
-        Recebe um voto de um eleitor para um candidato específico.
-        Realiza validações (eleitor registrado, eleitor não votou) e tenta replicar o voto.
+        Recebe um voto para um candidato específico.
+        Realiza a replicação do voto.
         Em caso de falha na replicação, reverte o voto localmente.
         Retorna uma tupla (sucesso: bool, mensagem: str).
         """
-        logger.info(f"[{self.server_id}] Tentativa de voto: eleitor='{username}', candidato='{candidate}'")
+        logger.info(f"[{self.server_id}] Tentativa de voto para candidato='{candidate}'")
 
         with self.lock: # Proteger o estado durante a validação e atualização local
-            if username not in self.voters:
-                logger.warning(f"[{self.server_id}] Erro: Eleitor '{username}' não registrado.")
-                return False, "Eleitor não registrado."
-
-            if username in self.voted_users:
-                logger.warning(f"[{self.server_id}] Erro: Eleitor '{username}' já votou.")
-                return False, "Você já votou."
-
             # Atualiza o estado localmente antes da replicação
             self.votes[candidate] = self.votes.get(candidate, 0) + 1
-            self.voted_users.add(username)
-            logger.info(f"[{self.server_id}] Voto de '{username}' para '{candidate}' registrado localmente.")
+            logger.info(f"[{self.server_id}] Voto para '{candidate}' registrado localmente.")
 
         # Tenta replicar o voto para outros servidores
-        success, message = self._replicate_vote(username, candidate)
+        success, message = self._replicate_vote(candidate)
 
         with self.lock: # Proteger o estado ao persistir ou reverter
             if success:
                 self._save_votes() # Persiste o estado local
-                self._save_voted_users()
-                logger.info(f"[{self.server_id}] Voto de '{username}' para '{candidate}' processado e replicado com sucesso.")
+                logger.info(f"[{self.server_id}] Voto para '{candidate}' processado e replicado com sucesso.")
                 return True, "Voto registrado com sucesso!"
             else:
                 # Se a replicação falhar, reverte o voto local
@@ -210,13 +148,11 @@ class VotingServer:
                 self.votes[candidate] -= 1
                 if self.votes[candidate] == 0:
                     del self.votes[candidate]
-                self.voted_users.remove(username)
                 self._save_votes() # Persiste a reversão
-                self._save_voted_users()
                 return False, message
 
 
-    def _replicate_vote(self, username, candidate):
+    def _replicate_vote(self, candidate):
         """
         Tenta replicar o voto para outros servidores.
         Usa uma estratégia de "quórum" simples: se a maioria dos outros servidores (incluindo o próprio nó)
@@ -237,11 +173,12 @@ class VotingServer:
             if other_server_id == self.server_id: # Evita tentar replicar para si mesmo
                 continue
             try:
+                time.sleep(3.0) # Atraso de 0.5 segundos antes de tentar replicar
                 # Usando o proxy como context manager
                 with Pyro4.Proxy(uri) as other_server_proxy:
                     # Chamamos um método interno para que o outro servidor atualize o estado
                     logger.info(f"[{self.server_id}] Replicando voto para '{other_server_id}' em {uri}...")
-                    is_ok, msg = other_server_proxy.internal_update_state(username, candidate)
+                    is_ok, msg = other_server_proxy.internal_update_state(candidate)
                     if is_ok:
                         successful_replications += 1
                         logger.info(f"[{self.server_id}] Replicação bem-sucedida para '{other_server_id}'.")
@@ -269,25 +206,17 @@ class VotingServer:
 
 
     @Pyro4.expose
-    def internal_update_state(self, username, candidate):
+    def internal_update_state(self, candidate):
         """
         Método interno para ser chamado por outros servidores para sincronização.
         Recebe um voto já validado por outro nó e apenas atualiza o estado local.
         Retorna uma tupla (sucesso: bool, mensagem: str).
         """
-        logger.info(f"[{self.server_id}] Recebido pedido de atualização de estado (voto) para '{username}'->'{candidate}'.")
+        logger.info(f"[{self.server_id}] Recebido pedido de atualização de estado (voto) para candidato='{candidate}'.")
         with self.lock:
-            if username in self.voted_users:
-                # Conflito de estado, este eleitor já votou nesta réplica.
-                # Para simplificar, vamos retornar uma falha.
-                logger.warning(f"[{self.server_id}] Erro interno: Eleitor '{username}' já votou nesta réplica. (Conflito de estado!)")
-                return False, "Conflito de estado detectado: eleitor já votou."
-
             self.votes[candidate] = self.votes.get(candidate, 0) + 1
-            self.voted_users.add(username)
             self._save_votes()
-            self._save_voted_users()
-            logger.info(f"[{self.server_id}] Estado local atualizado por replicação: '{username}' para '{candidate}'.")
+            logger.info(f"[{self.server_id}] Estado local atualizado por replicação para '{candidate}'.")
             return True, "Estado atualizado com sucesso."
 
     @Pyro4.expose
@@ -300,14 +229,13 @@ class VotingServer:
     @Pyro4.expose
     def get_full_state(self):
         """
-        Retorna o estado completo do servidor (votos e eleitores que já votaram).
+        Retorna o estado completo do servidor (votos).
         Usado para sincronização de nós que retornam à rede.
         """
         logger.info(f"[{self.server_id}] Requisição de estado completo recebida.")
         with self.lock:
             return {
                 'votes': dict(self.votes),
-                'voted_users': list(self.voted_users) # Converte set para list para serialização JSON
             }
 
     def run(self):

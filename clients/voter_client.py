@@ -1,3 +1,4 @@
+# clients/voter_client.py
 import Pyro4
 import Pyro4.errors
 import sys
@@ -10,7 +11,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
-from rich.box import MINIMAL # Para um estilo de tabela mais limpo
+from rich.box import MINIMAL # Para um estilo de tabela mais limpa
 
 # Adiciona o diretório 'common' ao sys.path para importação
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -32,7 +33,7 @@ Pyro4.config.COMMTIMEOUT = 5.0 # Timeout de 5 segundos
 class VoterClient:
     """
     Classe Cliente para interagir com o Sistema de Votação Distribuído.
-    Responsável pela autenticação, votação e consulta de resultados,
+    Responsável pela votação e consulta de resultados,
     com lógica de retentativa e failover entre servidores.
     Utiliza a biblioteca Rich para uma interface textual mais apresentável no terminal.
     """
@@ -40,8 +41,6 @@ class VoterClient:
         self.voting_server_proxy = None
         self.server_id = None
         self.ns = None
-        self.current_username = None
-        self.current_password = None
         self.max_retries = 3 # Número máximo de tentativas de reconexão/retry por operação
         self.retry_delay = 2 # Atraso em segundos entre as retentativas
 
@@ -147,40 +146,6 @@ class VoterClient:
         """Loop principal do cliente, guiando o eleitor através do processo de votação."""
         console.print(Panel("[bold green]Bem-vindo ao Sistema de Votação Distribuído![/bold green]", expand=False))
 
-        self.current_username = console.input("[bold blue]Digite seu nome de usuário: [/bold blue]").strip()
-        self.current_password = console.input("[bold blue]Digite sua senha: [/bold blue]").strip()
-
-        # --- Autenticação ---
-        console.print("[dim]Autenticando...[/dim]")
-        success, auth_result = self._execute_remote_call("authenticate_voter", self.current_username, self.current_password)
-        if not success or not auth_result:
-            logger.error(f"Autenticação falhou: {auth_result if not success else 'Credenciais inválidas.'}")
-            console.print(Panel(f"[bold red]Autenticação falhou![/bold red]\n[dim]{auth_result if not success else 'Credenciais inválidas.'}[/dim]", title="[bold red]Erro de Autenticação[/bold red]", border_style="red"))
-            return
-
-        logger.info(f"Eleitor '{self.current_username}' autenticado com sucesso.")
-        console.print(f"[green]Eleitor '[b]{self.current_username}[/b]' autenticado com sucesso.[/green]")
-
-        # --- Verificação de Voto ---
-        console.print("[dim]Verificando se você já votou...[/dim]")
-        success, has_voted_result = self._execute_remote_call("has_voted", self.current_username)
-        if not success:
-            logger.error(f"Erro ao verificar se já votou: {has_voted_result}")
-            console.print(Panel(f"[bold red]Erro ao verificar se já votou:[/bold red]\n[dim]{has_voted_result}[/dim]", title="[bold red]Erro[/bold red]", border_style="red"))
-            return
-
-        if has_voted_result:
-            logger.info("Você já votou anteriormente.")
-            console.print(Panel("[bold yellow]Você já votou anteriormente.[/bold yellow]", title="[bold yellow]Informação[/bold yellow]", border_style="yellow"))
-            success, results = self._execute_remote_call("get_results")
-            if success:
-                self._display_results(results)
-                logger.info(f"Resultados exibidos: {results}")
-            else:
-                logger.error(f"Não foi possível obter os resultados: {results}")
-                console.print(Panel(f"[bold red]Não foi possível obter os resultados:[/bold red]\n[dim]{results}[/dim]", title="[bold red]Erro[/bold red]", border_style="red"))
-            return
-
         # --- Processo de Voto ---
         console.print(Panel("[bold blue]Candidatos disponíveis (digite o número correspondente para votar):[/bold blue]", expand=False))
         available_candidates = ["Candidato A", "Candidato B", "Candidato C"]
@@ -204,7 +169,7 @@ class VoterClient:
                 console.print("[yellow]Entrada inválida. Por favor, digite um número.[/yellow]")
 
         console.print(f"[dim]Registrando seu voto para '{chosen_candidate}'...[/dim]")
-        success, message = self._execute_remote_call("cast_vote", self.current_username, chosen_candidate)
+        success, message = self._execute_remote_call("cast_vote", chosen_candidate) # Removed username
 
         if success:
             logger.info(f"Voto SUCCESSO: {message}")

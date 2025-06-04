@@ -5,3 +5,8 @@ VOTER_REGISTRATION_SERVER_NAME = "voter.registration.server"
 #Configurações do Name Server
 NAME_SERVER_HOST = "localhost"
 NAME_SERVER_PORT = 9090 # Porta padrão do Pyro Name Server
+
+# Configuração de logging
+import logging
+LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+LOG_LEVEL = logging.INFO # Pode ser logging.DEBUG, logging.WARNING, etc.

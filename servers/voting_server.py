@@ -135,6 +135,7 @@ class VotingServer:
             logger.info(f"[{self.server_id}] Voto para '{candidate}' registrado localmente.")
 
         # Tenta replicar o voto para outros servidores
+        # _replicate_vote agora retorna a mensagem de erro específica se o quorum não for atingido
         success, message = self._replicate_vote(candidate)
 
         with self.lock: # Proteger o estado ao persistir ou reverter
@@ -143,13 +144,14 @@ class VotingServer:
                 logger.info(f"[{self.server_id}] Voto para '{candidate}' processado e replicado com sucesso.")
                 return True, "Voto registrado com sucesso!"
             else:
-                # Se a replicação falhar, reverte o voto local
+                # Se a replicação falhar (quorum não atingido), reverte o voto local
                 logger.error(f"[{self.server_id}] Erro: Falha na replicação do voto. Revertendo estado local.")
                 self.votes[candidate] -= 1
-                if self.votes[candidate] == 0:
+                if self.votes[candidate] <= 0: # Usar <= 0 para garantir que seja removido se o voto for 0 ou negativo por algum erro
                     del self.votes[candidate]
                 self._save_votes() # Persiste a reversão
-                return False, message
+                # Retorna a mensagem de erro específica para o cliente
+                return False, "Houve um problema interno em nossos servidores, portanto seu voto não foi contabilizado. Tente novamente em instantes."
 
 
     def _replicate_vote(self, candidate):
@@ -162,25 +164,39 @@ class VotingServer:
         self.discover_other_servers() # Re-descobre os servidores para pegar novos ou remover caídos
 
         successful_replications = 0
-        total_replicas_to_contact = len(self.other_servers_uris)
+        
+        # O quorum deve considerar o próprio servidor que já processou o voto localmente.
+        # Portanto, o total de nós na rede é len(self.other_servers_uris) + 1 (o próprio nó).
+        total_active_nodes = len(self.other_servers_uris) + 1
 
-        if total_replicas_to_contact == 0:
-            logger.info(f"[{self.server_id}] Nenhuma outra réplica para sincronizar. Voto localmente consistente.")
+        # Quorum de maioria: ceil(total_active_nodes / 2)
+        required_successes = (total_active_nodes // 2) + (total_active_nodes % 2)
+
+        # Se sou o único servidor, o sucesso local já é suficiente para atingir o quorum.
+        if total_active_nodes == 1:
+            required_successes = 1
+
+        # A replicação para o próprio servidor já é um "sucesso" implícito (o voto já foi adicionado localmente)
+        # Então, já contamos um sucesso para o nó atual.
+        successful_replications_including_self = 1 
+        
+        if total_active_nodes == 1:
+            logger.info(f"[{self.server_id}] Sou o único nó ativo. Voto localmente consistente.")
             return True, "Voto processado localmente."
+
 
         # Para cada outro servidor, tente enviar o voto para que ele atualize seu estado.
         for other_server_id, uri in self.other_servers_uris.items():
-            if other_server_id == self.server_id: # Evita tentar replicar para si mesmo
+            if other_server_id == self.server_id: # Evita tentar replicar para si mesmo (embora other_servers_uris já exclua)
                 continue
             try:
-                time.sleep(3.0) # Atraso de 0.5 segundos antes de tentar replicar
+                time.sleep(5.0) # Atraso de 0.5 segundos antes de tentar replicar (opcional para simulação de atraso)
                 # Usando o proxy como context manager
                 with Pyro4.Proxy(uri) as other_server_proxy:
-                    # Chamamos um método interno para que o outro servidor atualize o estado
-                    logger.info(f"[{self.server_id}] Replicando voto para '{other_server_id}' em {uri}...")
+                    logger.info(f"[{self.server_id}] Solicitando replicação de voto para '{other_server_id}' em {uri}...")
                     is_ok, msg = other_server_proxy.internal_update_state(candidate)
                     if is_ok:
-                        successful_replications += 1
+                        successful_replications_including_self += 1
                         logger.info(f"[{self.server_id}] Replicação bem-sucedida para '{other_server_id}'.")
                     else:
                         logger.warning(f"[{self.server_id}] Replicação falhou para '{other_server_id}': {msg}")
@@ -189,20 +205,14 @@ class VotingServer:
             except Exception as e:
                 logger.error(f"[{self.server_id}] Erro inesperado ao replicar para '{other_server_id}' ({uri}): {e}")
 
-        # Condição de sucesso para replicação (exemplo: quórum de maioria)
-        # +1 para contar o próprio servidor que já processou o voto localmente
-        required_successes = (total_replicas_to_contact + 1) // 2
-        
-        # Garante que required_successes seja no mínimo 1 se houver apenas o servidor local
-        if total_replicas_to_contact == 0:
-             required_successes = 1 # Se sou o único servidor, o sucesso local já é suficiente
-
-        if (successful_replications + 1) >= required_successes:
-            logger.info(f"[{self.server_id}] Replicação concluída. Sucesso na maioria ({successful_replications+1}/{total_replicas_to_contact+1} nós).")
+        # Verifica se o quorum foi atingido
+        if successful_replications_including_self >= required_successes:
+            logger.info(f"[{self.server_id}] Replicação concluída. Quorum atingido ({successful_replications_including_self}/{total_active_nodes} nós).")
             return True, "Voto replicado e processado com sucesso."
         else:
-            logger.error(f"[{self.server_id}] Falha na replicação. Apenas {successful_replications+1} nós atualizaram o estado. Quórum ({required_successes}) não atingido.")
-            return False, "Falha na replicação do voto para a maioria dos nós."
+            logger.error(f"[{self.server_id}] Falha na replicação. Apenas {successful_replications_including_self} nós atualizaram o estado. Quórum ({required_successes}) não atingido.")
+            # Retorna uma mensagem genérica de falha para que cast_vote possa usar a mensagem específica
+            return False, "Quorum de replicação não atingido."
 
 
     @Pyro4.expose

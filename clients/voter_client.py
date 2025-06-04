@@ -20,8 +20,8 @@ sys.path.append(project_root)
 
 from common.constants import VOTING_SERVER_NAME_PREFIX, NAME_SERVER_HOST, NAME_SERVER_PORT, LOG_FORMAT, LOG_LEVEL
 
-# Configura o logging para o cliente
-logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
+# Configura o logging para o cliente - AUMENTAR O NÍVEL PARA EVITAR INFO/DEBUG NO CONSOLE
+logging.basicConfig(level=logging.WARNING, format=LOG_FORMAT) # Alterado para WARNING
 logger = logging.getLogger(__name__)
 
 # Configura o console Rich para saída
@@ -43,6 +43,7 @@ class VoterClient:
         self.ns = None
         self.max_retries = 3 # Número máximo de tentativas de reconexão/retry por operação
         self.retry_delay = 2 # Atraso em segundos entre as retentativas
+        self._last_connected_server = None # Para evitar mensagens de reconexão redundantes
 
     def _get_server_proxy(self):
         """
@@ -53,11 +54,12 @@ class VoterClient:
         if self.voting_server_proxy:
             try:
                 _ = self.voting_server_proxy.get_results()
+                # Se o servidor atual ainda funciona, não precisa logar novamente a conexão
                 return self.voting_server_proxy
             except (Pyro4.errors.CommunicationError, Pyro4.errors.NamingError, Pyro4.errors.TimeoutError):
                 logger.warning(f"Conexão existente com o servidor '{self.server_id}' falhou. Tentando reconectar...")
-                console.print(f"[yellow]Conexão existente com o servidor '[b]{self.server_id}[/b]' falhou. Tentando reconectar...[/yellow]")
-                self.voting_server_proxy = None
+                console.print(f"[yellow]Conexão com o servidor '[b]{self.server_id}[/b]' falhou. Tentando reconectar...[/yellow]")
+                self.voting_server_proxy = None # Limpar o proxy falho
 
         if not self.ns:
             try:
@@ -74,35 +76,31 @@ class VoterClient:
             console.print(Panel("[bold yellow]Nenhum servidor de votação disponível no Name Server.[/bold yellow]", title="[bold yellow]Aviso[/bold yellow]", border_style="yellow"))
             return None
 
-        table_servers = Table(title="[bold blue]Servidores de Votação Disponíveis[/bold blue]", box=MINIMAL)
-        table_servers.add_column("ID do Servidor", style="cyan", no_wrap=True)
-        table_servers.add_column("URI", style="green")
-
-        for name, uri in available_servers.items():
-            server_id = name.replace(VOTING_SERVER_NAME_PREFIX, '')
-            table_servers.add_row(server_id, uri)
-        console.print(table_servers)
-
-
+        # Tentar conectar aos servidores disponíveis
         for name, uri in available_servers.items():
             server_id = name.replace(VOTING_SERVER_NAME_PREFIX, '')
             try:
                 with Pyro4.Proxy(uri) as proxy:
-                    _ = proxy.get_results()
+                    _ = proxy.get_results() # Testar a conexão
                     self.voting_server_proxy = proxy
                     self.server_id = server_id
-                    logger.info(f"Conectado com sucesso ao servidor de votação '{self.server_id}'.")
-                    console.print(f"[green]Conectado com sucesso ao servidor de votação '[b]{self.server_id}[/b]'[/green]")
+                    # Mostrar mensagem de conexão apenas se for uma nova conexão ou reconexão a um servidor diferente
+                    if self._last_connected_server != self.server_id:
+                        logger.info(f"Conectado com sucesso ao servidor de votação '{self.server_id}'.") # Isso aparece no log
+                        console.print(f"[green]Conectado ao servidor '[b]{self.server_id}[/b]'[/green]") # Isso aparece para o usuário
+                        self._last_connected_server = self.server_id
                     return self.voting_server_proxy
             except (Pyro4.errors.CommunicationError, Pyro4.errors.NamingError, Pyro4.errors.TimeoutError) as e:
                 logger.warning(f"Não foi possível conectar ao servidor '{server_id}' em {uri}: {e}")
-                console.print(f"[yellow]Não foi possível conectar ao servidor '[b]{server_id}[/b]' (URI: {uri}).[/yellow] [dim]Detalhes: {e}[/dim]")
+                # Não exibir para o usuário final, apenas no log
+                # console.print(f"[yellow]Não foi possível conectar ao servidor '[b]{server_id}[/b]' (URI: {uri}).[/yellow] [dim]Detalhes: {e}[/dim]")
             except Exception as e:
                 logger.error(f"Erro inesperado ao conectar ao servidor '{server_id}' em {uri}: {e}")
-                console.print(f"[red]Erro inesperado ao conectar ao servidor '[b]{server_id}[/b]' (URI: {uri}).[/red] [dim]Detalhes: {e}[/dim]")
+                # Não exibir para o usuário final, apenas no log
+                # console.print(f"[red]Erro inesperado ao conectar ao servidor '[b]{server_id}[/b]' (URI: {uri}).[/red] [dim]Detalhes: {e}[/dim]")
 
         logger.warning("Não foi possível conectar a nenhum servidor de votação disponível após escanear a lista.")
-        console.print(Panel("[bold red]Não foi possível conectar a nenhum servidor de votação disponível após escanear a lista. Tente novamente mais tarde.[/bold red]", title="[bold red]Falha na Conexão[/bold red]", border_style="red"))
+        console.print(Panel("[bold red]Não foi possível conectar a nenhum servidor de votação disponível. Tentando novamente...[/bold red]", title="[bold red]Falha na Conexão[/bold red]", border_style="red"))
         return None
 
     def _execute_remote_call(self, method_name, *args):
@@ -115,36 +113,52 @@ class VoterClient:
             server = self._get_server_proxy()
             if not server:
                 logger.warning(f"[{method_name}] Nenhum servidor disponível para executar a operação. Tentativa {retries_count + 1}/{self.max_retries}.")
-                console.print(f"[yellow][{method_name}] Nenhum servidor disponível para executar a operação. Tentativa {retries_count + 1}/{self.max_retries}.[/yellow]")
+                # console.print(f"[yellow][{method_name}] Nenhum servidor disponível para executar a operação. Tentativa {retries_count + 1}/{self.max_retries}.[/yellow]") # Remover para reduzir poluição
                 retries_count += 1
                 time.sleep(self.retry_delay)
                 continue
 
             try:
                 method_to_call = getattr(server, method_name)
-                result = method_to_call(*args)
-                return True, result
+                # O resultado de cast_vote é uma tupla (bool, str)
+                success, message = method_to_call(*args)
+                return success, message # Retorna diretamente o sucesso e a mensagem do servidor
 
             except (Pyro4.errors.CommunicationError, Pyro4.errors.NamingError, Pyro4.errors.TimeoutError) as e:
                 logger.warning(f"[{method_name}] Erro de comunicação com o servidor atual '{self.server_id}': {e}")
-                console.print(f"[yellow][{method_name}] Erro de comunicação com o servidor atual '[b]{self.server_id}[/b]': {e}.[/yellow]")
-                console.print(f"[yellow][{method_name}] Tentando reconectar a outro servidor... Tentativa {retries_count + 1}/{self.max_retries}.[/yellow]")
+                # Apenas uma mensagem concisa para o usuário
+                console.print(f"[yellow]Servidor '{self.server_id}' falhou. Tentando conectar a outro servidor...[/yellow]")
                 self.voting_server_proxy = None
                 retries_count += 1
                 time.sleep(self.retry_delay)
             except Exception as e:
                 logger.error(f"[{method_name}] Ocorreu um erro inesperado durante a chamada remota: {e}")
-                console.print(f"[red][{method_name}] Ocorreu um erro inesperado durante a chamada remota: {e}.[/red]")
+                console.print(f"[red]Ocorreu um erro inesperado: {e}.[/red]") # Mensagem mais genérica para o usuário
                 retries_count += 1
                 time.sleep(self.retry_delay)
 
         logger.error(f"Não foi possível completar a operação '{method_name}' após {self.max_retries} tentativas.")
-        console.print(Panel(f"[bold red]Não foi possível completar a operação '[b]{method_name}[/b]' após {self.max_retries} tentativas.[/bold red]", title="[bold red]Erro Crítico[/bold red]", border_style="red"))
-        return False, f"Não foi possível completar a operação '{method_name}' após {self.max_retries} tentativas."
+        # Esta mensagem é o fallback se TODAS as tentativas falharem, sem obter resposta do servidor.
+        return False, "Não foi possível completar a operação. O sistema de votação pode estar indisponível."
 
     def run(self):
         """Loop principal do cliente, guiando o eleitor através do processo de votação."""
         console.print(Panel("[bold green]Bem-vindo ao Sistema de Votação Distribuído![/bold green]", expand=False))
+
+        # Tenta conectar-se ao servidor logo ao iniciar
+        initial_connection_successful = False
+        console.print("[dim]Conectando ao servidor de votação...[/dim]")
+        for _ in range(self.max_retries):
+            if self._get_server_proxy():
+                initial_connection_successful = True
+                break
+            console.print(f"[yellow]Tentando conexão inicial em {self.retry_delay} segundos...[/yellow]")
+            time.sleep(self.retry_delay)
+
+        if not initial_connection_successful:
+            console.print(Panel("[bold red]Não foi possível conectar a nenhum servidor de votação após várias tentativas. Encerrando.[/bold red]", title="[bold red]Erro Fatal[/bold red]", border_style="red"))
+            sys.exit(1)
+
 
         # --- Processo de Voto ---
         console.print(Panel("[bold blue]Candidatos disponíveis (digite o número correspondente para votar):[/bold blue]", expand=False))
@@ -169,7 +183,7 @@ class VoterClient:
                 console.print("[yellow]Entrada inválida. Por favor, digite um número.[/yellow]")
 
         console.print(f"[dim]Registrando seu voto para '{chosen_candidate}'...[/dim]")
-        success, message = self._execute_remote_call("cast_vote", chosen_candidate) # Removed username
+        success, message = self._execute_remote_call("cast_vote", chosen_candidate) # A mensagem agora virá do servidor
 
         if success:
             logger.info(f"Voto SUCCESSO: {message}")
@@ -178,15 +192,9 @@ class VoterClient:
             logger.error(f"Voto FALHA: {message}")
             console.print(Panel(f"[bold red]FALHA![/bold red]\n{message}", title="[bold red]Erro no Voto[/bold red]", border_style="red"))
 
-        # --- Obter Resultados Finais ---
-        console.print("[dim]Obtendo resultados finais...[/dim]")
-        success, results = self._execute_remote_call("get_results")
-        if success:
-            self._display_results(results, final=True)
-            logger.info(f"Resultados finais exibidos: {results}")
-        else:
-            logger.error(f"Não foi possível obter os resultados finais: {results}")
-            console.print(Panel(f"[bold red]Não foi possível obter os resultados finais:[/bold red]\n[dim]{results}[/dim]", title="[bold red]Erro[/bold red]", border_style="red"))
+        console.print("[bold blue]Processo de votação concluído. Encerrando o cliente.[/bold blue]")
+        sys.exit(0)
+
 
     def _display_results(self, results, final=False):
         """Exibe os resultados da votação usando uma tabela Rich."""
